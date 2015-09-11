@@ -9,14 +9,17 @@ import bagit
 from func import file_size
 from func import error
 from func import update_log
-from func import normalize_date
+from func import date_from_normal
 from validate import validate
+import smtplib
+from smtplib import SMTP
 
 def AutoUpload(inputDir):
 
 	#inputDir = '//romeo/Collect/AutoUpload'
 	faDir = '//romeo/wwwroot/eresources/metadata_testing'
 	workingDir = '//romeo/SPE/workflow/AutoUpload_admin/working'
+	errorDir = '//romeo/SPE/workflow/AutoUpload_admin/errors'
 	adminDir = '//romeo/SPE/workflow/AutoUpload_admin'
 	accessDir = '//romeo/wwwroot/eresources/digital_objects'
 	presDir = '//romeo/SPE/workflow/AutoUpload_storage'
@@ -26,6 +29,10 @@ def AutoUpload(inputDir):
 
 
 	for inputFile in os.listdir(inputDir):
+		if not inputFile.startswith('Thumbs'):
+			pass
+		else:
+			continue
 		
 		#start date and time
 		dateStart = datetime.datetime.now()
@@ -42,7 +49,8 @@ def AutoUpload(inputDir):
 							recentChangeId = change.attrib['id']
 			changeId = str(int(recentChangeId) + 1)
 		except Exception as exceptMsg:
-			error("Could not create change ID", dateStart, "", "unable to create changeId", os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Could not create change ID", dateStart, "", "unable to create changeId", os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		#create log
 		try:
@@ -76,7 +84,8 @@ def AutoUpload(inputDir):
 			createLog.write(logString)
 			createLog.close()
 		except Exception as exceptMsg:
-			error("Could not find or create new log entry", dateStart, "", changeId, os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Could not find or create new log entry", dateStart, "", changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		#get data from upload file's filename
 		try:
@@ -87,12 +96,26 @@ def AutoUpload(inputDir):
 			if "---" in fileName:
 				recordId = fileName.split('---')[0]
 				newMetadata = fileName.split('---')[1]
-				if "_" in newMetadata:
-					newDescription = newMetadata.split('_')[0]
-					newDate = newMetadata.split('_')[1]
+				uCount = newMetadata.count('_')
+				if uCount > 0:
+					if uCount == 1:
+						newDescription = newMetadata.split('_')[0]
+						newDate = newMetadata.split('_')[1]
+					elif uCount == 2:
+						newDescription = newMetadata.split('_')[0]
+						newDate = newMetadata.split('_')[1] + "/" + newMetadata.split('_')[2]
+					else:
+						raise ValueError("Invalid upload filename, incorrect underscores (_) in date.")
 				else:
 					newDescription = newMetadata
 					newDate = ""
+				originalFilename_element = ET.Element('originalFilename')
+				originalFilename_element.text = uploadFile
+				update_log(logPath, changeId, "message", originalFilename_element)
+				if "---" in uploadFile:
+					fileExtension = uploadFile.split('.')[-1]
+					os.rename(inputDir + "/" + uploadFile, inputDir + "/" + uploadFile.split('---')[0] + "." + fileExtension)
+					uploadFile = uploadFile.split('---')[0] + "." + fileExtension
 			else:
 				recordId = fileName
 				newDescription = ""
@@ -101,12 +124,13 @@ def AutoUpload(inputDir):
 			recordId_element.text = recordId
 			update_log(logPath, changeId, "recordId", recordId_element)
 			collectionId = recordId.split('-')[0][len('nam_'):]
-			fileSize = file_size(os.stat(inputDir + "/" + inputFile).st_size)
+			fileSize = file_size(os.stat(inputDir + "/" + uploadFile).st_size)
 			data_element = ET.Element('data')
 			data_element.text = "data read from filename"
 			update_log(logPath, changeId, "message", data_element)
 		except Exception as exceptMsg:
-			error("Invalid filename, failed to get data from upload file's filename", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)	
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Invalid filename, failed to get data from upload file's filename", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)	
 		
 		#copy and log original finding aid
 		try:
@@ -119,7 +143,7 @@ def AutoUpload(inputDir):
 			if not os.path.exists(adminDir + "/findingaids/" + newYear + "/" + newMonth):
 				os.makedirs(adminDir + "/findingaids/" + newYear + "/" + newMonth)
 			FAlogLocation = adminDir + "/findingaids/" + newYear + "/" + newMonth
-			shutil.copy(matchingFindingAid, FAlogLocation)
+			shutil.copy2(matchingFindingAid, FAlogLocation)
 			FAlogHash = hashlib.md5(open(FAlogLocation + "/" + collectionId + ".xml", 'rb').read()).hexdigest()
 			if not FAlogHash == originalHash:
 				raise ValueError("Checksum error, log finding aid does not match original finding aid.")
@@ -127,18 +151,19 @@ def AutoUpload(inputDir):
 			logged_element = ET.Element('logged')
 			logged_element.text = "finding aid logged"
 			update_log(logPath, changeId, "message", logged_element)
-			shutil.copy(matchingFindingAid, workingDir)
+			shutil.copy2(matchingFindingAid, workingDir)
 			workingHash = hashlib.md5(open(workingDir + "/" + collectionId + ".xml", 'rb').read()).hexdigest()
 			if not workingHash == originalHash:
 				raise ValueError("Checksum error, working finding aid does not match original finding aid.")
 		except Exception as exceptMsg:
-			error("Failed to copy and log original finding aid", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)	
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Failed to copy and log original finding aid", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)	
 		
 		
 		#create preservation copy
 		try:
 			uploadHash = hashlib.md5(open(inputDir + "/" + uploadFile, 'rb').read()).hexdigest()
-			shutil.copy(inputDir + "/" + uploadFile, presDir + "/data")
+			shutil.copy2(inputDir + "/" + uploadFile, presDir + "/data")
 			presHash = hashlib.md5(open(presDir + "/data/" + uploadFile, 'rb').read()).hexdigest()
 			if not presHash == uploadHash:
 				raise ValueError("Checksum error, file in preservation directory does not match original file.")
@@ -152,18 +177,20 @@ def AutoUpload(inputDir):
 			preservation_element.text = "preservation file created"
 			update_log(logPath, changeId, "message", preservation_element)
 		except Exception as exceptMsg:
-			error("Failed to create preservation copy", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)	
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Failed to create preservation copy", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)	
 		
 		#create access copy
 		try:
 			if not os.path.exists(accessDir + "/" + collectionId):
 				os.makedirs(accessDir + "/" + collectionId)
-			shutil.copy(inputDir + "/" + uploadFile, accessDir + "/" + collectionId)
+			shutil.copy2(inputDir + "/" + uploadFile, accessDir + "/" + collectionId)
 			access_element = ET.Element('access')
 			access_element.text = "access file created"
 			update_log(logPath, changeId, "message", access_element)
 		except Exception as exceptMsg:
-			error("Failed to create access copy", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Failed to create access copy", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		
 		#update matching record in finding aid
@@ -215,29 +242,46 @@ def AutoUpload(inputDir):
 							dao_element.set('show', 'new')
 							update_log(logPath, changeId, "changedRecord", cmpnt)
 							cmpntParent.insert(cmpntIndex, cmpnt)
+							break
 						else:
 							raise ValueError("Error matching to Finding Aid, digital object already found.")
 					else:
-						if "." in recordId:
-							if cmpnt.attrib['id'] == ''.join(recordId.split('.')[:-1]):
+						#detects last special character to only enable parent matches to be made at item level rather than '.' in series level
+						specialCount = 0
+						for char in reversed(recordId):
+							if char == "_":
+								specialCount = 1
+								break
+							elif char == ".":
+								specialCount = 2
+								break
+						if "." in recordId and specialCount == 2:
+							if cmpnt.attrib['id'] == '.'.join(recordId.split('.')[:-1]):
 								if cmpnt.find('did/dao') is None:
 									#parent match
+									cmpntParent = cmpnt.getparent()
+									cmpntIndex = cmpntParent.index(cmpnt)
 									match_element = ET.Element('match')
 									match_element.text = "parent match found"
 									update_log(logPath, changeId, "message", match_element)
 									matchCount = matchCount + 1
 									update_log(logPath, changeId, "originalRecord", cmpnt)
-									childElement = int(cmpnt.tag[1:]) + 1
+									childElementNumber = int(cmpnt.tag[1:]) + 1
+									childElement = ET.Element("c0" + str(childElementNumber))
 									cmpnt.append(childElement)
 									childElement.set('id', recordId)
 									did_element = ET.SubElement(childElement, "did")
 									if len(newDescription) > 0:
 										unittitle_element = ET.SubElement(did_element, "unittitle")
 										unittitle_element.text = newDescription
+									else:
+										unittitle_element = ET.SubElement(did_element, "unittitle")
+										unittitle_element.text = "Item"
 									if len(newDate) > 0:
 										unitdate_element = ET.SubElement(did_element, "unitdate")
-										unitdate_element.text = unitdate_element
-										#unitdate_element.set('normal', normalize_date(newDate.strip()))
+										unitdate_element.text = date_from_normal(newDate.strip())
+										unitdate_element.set('normal', newDate)
+									dao_element = ET.Element('dao')
 									did_element.append(dao_element)
 									physdesc_element = ET.SubElement(did_element, "physdesc")
 									physdesc_element.text = fileSize
@@ -247,12 +291,16 @@ def AutoUpload(inputDir):
 									dao_element.set('linktype', 'simple')
 									dao_element.set('show', 'new')
 									update_log(logPath, changeId, "changedRecord", cmpnt)
+									cmpntParent.insert(cmpntIndex, cmpnt)
+									break
 								else:
 									raise ValueError("Error matching to Finding Aid, digital object already found.")
 		except Exception as exceptMsg:
-			error("Failed to update record.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			print exceptMsg
+			error("Failed to update record.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
-		#write finding aid to working directory	
+		#write finding aid to working directory
 		try:
 			if matchCount == 1:
 				FAString = ET.tostring(FA, pretty_print=True, xml_declaration=True, encoding="utf-8", doctype="<!DOCTYPE ead SYSTEM 'ead.dtd'>")
@@ -273,35 +321,53 @@ def AutoUpload(inputDir):
 			else:
 				raise ValueError("Error matching to Finding Aid.")
 		except Exception as exceptMsg:
-			error("Error matching to Finding Aid, matchCount variable issue.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Error matching to Finding Aid, matchCount variable issue.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		#Validate and copy finding aid
-		workingFindingAid = workingDir + "/" + collectionId + ".xml"
-		issueCount, issueTriplet = validate(workingFindingAid)
-		if issueCount != 0:
-			raise ValueError("Updated finding aid did not validate.")
-		validate_element = ET.Element('validate')
-		validate_element.text = "finding aid validated"
-		update_log(logPath, changeId, "message", validate_element)
-		shutil.copy(workingFindingAid, faDir)
-		update_element = ET.Element('update')
-		update_element.text = "finding aid directory updated"
-		update_log(logPath, changeId, "message", update_element)
+		try:
+			workingFindingAid = workingDir + "/" + collectionId + ".xml"
+			issueCount, issueTriplet = validate(workingFindingAid)
+			if issueCount != 0:
+				raise ValueError("Updated finding aid did not validate.")
+			validate_element = ET.Element('validate')
+			validate_element.text = "finding aid validated"
+			update_log(logPath, changeId, "message", validate_element)
+			shutil.copy2(workingFindingAid, faDir)
+			update_element = ET.Element('update')
+			update_element.text = "finding aid directory updated"
+			update_log(logPath, changeId, "message", update_element)
+		except Exception as exceptMsg:
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Error validating Finding Aid.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		#transform finding aid to HTML
-		cmd = "java -cp c:\saxon\saxon9he.jar net.sf.saxon.Transform -t "
-		if isinstance(pi, ET._XSLTProcessingInstruction):
-			if "no_series" in str(pi):
-				cmd = cmd + "-s:" + workingDir + "/" + collectionId + ".xml" + " -xsl:" +  faDir + "/collection-level_no_series.xsl" + " -o:" + workingDir + "/" + collectionId + ".html"
+		try:
+			cmd = "java -cp c:\saxon\saxon9he.jar net.sf.saxon.Transform -t "
+			if isinstance(pi, ET._XSLTProcessingInstruction):
+				if "no_series" in str(pi):
+					cmd = cmd + "-s:" + workingDir + "/" + collectionId + ".xml" + " -xsl:" +  faDir + "/collection-level_no_series.xsl" + " -o:" + workingDir + "/" + collectionId + ".html"
+				else:
+					cmd = cmd + "-s:" + workingDir + "/" + collectionId + ".xml" + " -xsl:" +  faDir + "/collection-level.xsl" + " -o:" + workingDir + "/" + collectionId + ".html"
+				os.system(cmd)
+				shutil.copy2(workingDir + "/" + collectionId + ".html", faDir)
+				transform_element = ET.Element('transform')
+				transform_element.text = "finding aid transformed to HTML"
+				update_log(logPath, changeId, "message", transform_element)
 			else:
-				cmd = cmd + "-s:" + workingDir + "/" + collectionId + ".xml" + " -xsl:" +  faDir + "/collection-level.xsl" + " -o:" + workingDir + "/" + collectionId + ".html"
-			os.system(cmd)
-			shutil.copy(workingDir + "/" + collectionId + ".html", faDir)
-			transform_element = ET.Element('transform')
-			transform_element.text = "finding aid transformed to HTML"
-			update_log(logPath, changeId, "message", transform_element)
-		else:
-			raise ValueError("Error transforming finding aid, processing instruction error.")
+				raise ValueError("Error transforming finding aid, processing instruction error.")
+		except Exception as exceptMsg:
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Error transforming Finding Aid.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
+		
+		#remove files in upload directory and working directory
+		try:
+			os.remove(inputDir + "/" + uploadFile)
+			os.remove(workingDir + "/" + collectionId + ".xml")
+			os.remove(workingDir + "/" + collectionId + ".html")
+		except Exception as exceptMsg:
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Error removing upload or working files.", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
 		
 		#change status and finalize log
 		try:
@@ -313,4 +379,5 @@ def AutoUpload(inputDir):
 			dateComplete_element.text = str(dateFinish)
 			update_log(logPath, changeId, "dateComplete", dateComplete_element)
 		except Exception as exceptMsg:
-			error("Failed to finalize log", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg)
+			exceptLine = sys.exc_traceback.tb_lineno
+			error("Failed to finalize log", dateStart, logPath, changeId, os.path.basename(inputFile), exceptMsg, exceptLine, errorDir, inputDir + '/' + uploadFile)
